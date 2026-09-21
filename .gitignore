@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+.env
+*.log
+
+.firebase/
+serviceAccountKey.json
+
+.pytest_cache/
+.coverage
