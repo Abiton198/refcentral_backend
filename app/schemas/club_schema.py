@@ -5,14 +5,12 @@ from pydantic import BaseModel, EmailStr, Field
 
 class ClubCreate(BaseModel):
     """
-    Defines the information required to register a new rugby club.
+    Data required when registering a new club.
 
-    Important:
-    - created_by_uid is NOT accepted from the frontend.
-    - The backend obtains the authenticated user's UID from Firebase.
+    The authenticated user's UID is obtained from Firebase.
+    It must not be submitted by the frontend.
     """
 
-    # Official name of the rugby club
     name: str = Field(
         ...,
         min_length=2,
@@ -20,27 +18,23 @@ class ClubCreate(BaseModel):
         description="Official rugby club name",
     )
 
-    # Optional registration or affiliation number
     registration_number: Optional[str] = Field(
         default=None,
         max_length=100,
         description="Club registration or affiliation number",
     )
 
-    # Main club email address
     email: EmailStr = Field(
         ...,
         description="Official club email address",
     )
 
-    # Contact telephone number
     phone: Optional[str] = Field(
         default=None,
         max_length=30,
         description="Club contact telephone number",
     )
 
-    # Physical or postal address of the club
     address: Optional[str] = Field(
         default=None,
         max_length=300,
@@ -50,21 +44,32 @@ class ClubCreate(BaseModel):
 
 class ClubResponse(BaseModel):
     """
-    Defines the format returned after a club is created.
+    Standard club information returned by the API.
     """
 
-    # Firestore-generated document ID
     club_id: str
-
-    # Club information
     name: str
     registration_number: Optional[str] = None
     email: str
     phone: Optional[str] = None
     address: Optional[str] = None
-
-    # UID of the authenticated user who created the club
     created_by_uid: str
-
-    # Indicates whether the club is currently active
     status: str
+
+
+class ClubMemberResponse(BaseModel):
+    """
+    Represents a user's membership in a club.
+    """
+
+    uid: str
+    role: str
+    status: str
+
+
+class ClubDetailsResponse(ClubResponse):
+    """
+    Provides club information together with the user's membership role.
+    """
+
+    membership: ClubMemberResponse

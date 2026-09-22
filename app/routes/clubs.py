@@ -2,16 +2,91 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.schemas.club_schema import ClubCreate, ClubResponse
+from app.schemas.club_schema import (
+    ClubCreate,
+    ClubDetailsResponse,
+    ClubMemberResponse,
+    ClubResponse,
+)
+
 from app.services.firestore_service import get_firestore_client
 from app.utils.auth import get_current_user
 
 
-# Create a router specifically for club-related endpoints
+# Router containing all club-related API endpoints
 router = APIRouter(
     prefix="/api/clubs",
     tags=["Clubs"],
 )
+
+
+def get_authenticated_uid(current_user: dict) -> str:
+    """
+    Extract the UID from the verified Firebase authentication token.
+
+    We always use the UID provided by Firebase rather than accepting
+    a user ID supplied in the request body.
+    """
+
+    user_uid = current_user.get("uid")
+
+    if not user_uid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user UID was not found",
+        )
+
+    return user_uid
+
+
+def get_club_membership(db, club_id: str, user_uid: str):
+    """
+    Check whether a user belongs to a particular club.
+
+    Firestore path:
+        clubs/{club_id}/members/{user_uid}
+
+    Returns:
+        Membership document data if the user belongs to the club.
+        None if the membership does not exist.
+    """
+
+    membership_reference = (
+        db.collection("clubs")
+        .document(club_id)
+        .collection("members")
+        .document(user_uid)
+    )
+
+    membership_snapshot = membership_reference.get()
+
+    if not membership_snapshot.exists:
+        return None
+
+    return membership_snapshot.to_dict()
+
+
+def build_club_response(
+    club_id: str,
+    club_data: dict,
+) -> ClubResponse:
+    """
+    Convert Firestore data into the API response format.
+
+    Keeping this conversion in one place helps maintain consistency
+    across different club endpoints.
+    """
+
+    return ClubResponse(
+        club_id=club_id,
+        name=club_data.get("name", ""),
+        registration_number=club_data.get("registration_number"),
+        email=club_data.get("email", ""),
+        phone=club_data.get("phone"),
+        address=club_data.get("address"),
+        created_by_uid=club_data.get("created_by_uid", ""),
+        status=club_data.get("status", "active"),
+    )
 
 
 @router.post(
@@ -26,41 +101,22 @@ def create_club(
     """
     Register a new rugby club.
 
-    Authentication:
-    - The user must provide a valid Firebase ID token.
-
-    Security:
-    - The creator's UID comes from Firebase authentication.
-    - The frontend cannot choose or impersonate another creator.
+    The authenticated user automatically becomes the club owner.
     """
 
+    user_uid = get_authenticated_uid(current_user)
+
     try:
-        # Get the authenticated Firebase user's UID
-        user_uid = current_user.get("uid")
-
-        # This should normally be available after Firebase verification
-        if not user_uid:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authenticated user UID was not found",
-            )
-
         # Connect to Firestore
         db = get_firestore_client()
 
-        # Reference the top-level "clubs" collection
-        clubs_collection = db.collection("clubs")
+        # Create a new Firestore document with an automatic ID
+        club_document = db.collection("clubs").document()
 
-        # Create a new document with an automatically generated ID
-        club_document = clubs_collection.document()
-
-        # Get the generated Firestore document ID
         club_id = club_document.id
-
-        # Create a UTC timestamp for the new club
         current_time = datetime.now(timezone.utc)
 
-        # Prepare the data that will be stored in Firestore
+        # Prepare the club record
         club_record = {
             "club_id": club_id,
             "name": club_data.name.strip(),
@@ -74,22 +130,17 @@ def create_club(
             "updated_at": current_time,
         }
 
-        # Save the club information in Firestore
+        # Save the club to Firestore
         club_document.set(club_record)
 
-        # Store the creator as the club owner
-        #
-        # Example Firestore path:
-        # clubs/{club_id}/members/{user_uid}
-        #
-        # This will help us manage club administrators and members later.
-        member_document = (
+        # Create the owner's membership record
+        owner_reference = (
             club_document
             .collection("members")
             .document(user_uid)
         )
 
-        member_document.set(
+        owner_reference.set(
             {
                 "uid": user_uid,
                 "role": "owner",
@@ -98,28 +149,178 @@ def create_club(
             }
         )
 
-        # Return a clean response to the frontend
-        return ClubResponse(
+        return build_club_response(
             club_id=club_id,
-            name=club_record["name"],
-            registration_number=club_record["registration_number"],
-            email=club_record["email"],
-            phone=club_record["phone"],
-            address=club_record["address"],
-            created_by_uid=user_uid,
-            status=club_record["status"],
+            club_data=club_record,
         )
 
-    except HTTPException:
-        # Re-raise expected HTTP errors without changing them
-        raise
-
     except Exception as error:
-        # Log the error in the terminal during development
+        # Print the technical error during development
         print(f"Error creating club: {error}")
 
-        # Return a safe error message to the client
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unable to register club",
+        )
+
+
+@router.get(
+    "/my",
+    response_model=list[ClubDetailsResponse],
+)
+def get_my_clubs(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return every club where the authenticated user has membership.
+
+    A collection-group query searches all members subcollections:
+        clubs/{club_id}/members/{user_uid}
+    """
+
+    user_uid = get_authenticated_uid(current_user)
+
+    try:
+        db = get_firestore_client()
+
+        # Search every "members" subcollection for this user's UID
+        membership_query = (
+            db.collection_group("members")
+            .where("uid", "==", user_uid)
+            .stream()
+        )
+
+        clubs = []
+
+        for membership_snapshot in membership_query:
+            # Read the membership information
+            membership_data = membership_snapshot.to_dict()
+
+            # The membership document's parent is the members collection.
+            # Its parent is the actual club document.
+            club_reference = membership_snapshot.reference.parent.parent
+
+            if club_reference is None:
+                continue
+
+            club_snapshot = club_reference.get()
+
+            # Ignore memberships whose club document no longer exists
+            if not club_snapshot.exists:
+                continue
+
+            club_data = club_snapshot.to_dict()
+
+            # Build the response including the user's club role
+            club_response = ClubDetailsResponse(
+                club_id=club_snapshot.id,
+                name=club_data.get("name", ""),
+                registration_number=club_data.get(
+                    "registration_number"
+                ),
+                email=club_data.get("email", ""),
+                phone=club_data.get("phone"),
+                address=club_data.get("address"),
+                created_by_uid=club_data.get(
+                    "created_by_uid",
+                    "",
+                ),
+                status=club_data.get("status", "active"),
+                membership=ClubMemberResponse(
+                    uid=membership_data.get("uid", user_uid),
+                    role=membership_data.get("role", "member"),
+                    status=membership_data.get("status", "active"),
+                ),
+            )
+
+            clubs.append(club_response)
+
+        return clubs
+
+    except Exception as error:
+        print(f"Error retrieving user's clubs: {error}")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to retrieve clubs",
+        )
+
+
+@router.get(
+    "/{club_id}",
+    response_model=ClubDetailsResponse,
+)
+def get_club(
+    club_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve one club.
+
+    Security:
+    - The user must have an active membership in this club.
+    - A valid Firebase token alone is not enough to access every club.
+    """
+
+    user_uid = get_authenticated_uid(current_user)
+
+    try:
+        db = get_firestore_client()
+
+        # Check whether the user belongs to this club
+        membership_data = get_club_membership(
+            db=db,
+            club_id=club_id,
+            user_uid=user_uid,
+        )
+
+        if not membership_data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this club",
+            )
+
+        # Retrieve the club document
+        club_reference = db.collection("clubs").document(club_id)
+        club_snapshot = club_reference.get()
+
+        if not club_snapshot.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Club not found",
+            )
+
+        club_data = club_snapshot.to_dict()
+
+        return ClubDetailsResponse(
+            club_id=club_snapshot.id,
+            name=club_data.get("name", ""),
+            registration_number=club_data.get(
+                "registration_number"
+            ),
+            email=club_data.get("email", ""),
+            phone=club_data.get("phone"),
+            address=club_data.get("address"),
+            created_by_uid=club_data.get(
+                "created_by_uid",
+                "",
+            ),
+            status=club_data.get("status", "active"),
+            membership=ClubMemberResponse(
+                uid=membership_data.get("uid", user_uid),
+                role=membership_data.get("role", "member"),
+                status=membership_data.get("status", "active"),
+            ),
+        )
+
+    except HTTPException:
+        # Preserve intentional HTTP errors
+        raise
+
+    except Exception as error:
+        print(f"Error retrieving club: {error}")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to retrieve club",
         )

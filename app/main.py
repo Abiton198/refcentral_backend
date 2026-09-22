@@ -3,6 +3,7 @@ from fastapi import FastAPI
 # Import application route modules
 from app.routes.health import router as health_router
 from app.routes.clubs import router as clubs_router
+from app.routes.players import router as players_router
 
 
 # Create the FastAPI application
@@ -13,17 +14,16 @@ app = FastAPI(
 )
 
 
-# Register the health-check routes
+# Register API routes
 app.include_router(health_router)
-
-# Register the club-management routes
 app.include_router(clubs_router)
+app.include_router(players_router)
 
 
 @app.get("/")
 def root():
     """
-    Basic endpoint used to confirm that the API is running.
+    Confirm that the backend is running.
     """
 
     return {
