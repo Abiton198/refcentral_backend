@@ -29,7 +29,9 @@ from app.routes.appointments import router as appointments_router
 from app.routes.team_memberships import (router as team_memberships_router,)
 from app.routes.player_documents import (router as player_documents_router,)
 from app.routes.player_photos import (router as player_photos_router,)
-
+from app.routes.team_registrations import (
+    router as team_registrations_router,
+)
 
 # ---------------------------------------------------------
 # FastAPI application
@@ -94,6 +96,9 @@ app.include_router(player_documents_router)
 
 # Private player profile photographs.
 app.include_router(player_photos_router)
+
+# team onboard
+app.include_router(team_registrations_router)
 
 # ---------------------------------------------------------
 # Root endpoint
