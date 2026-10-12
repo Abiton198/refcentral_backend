@@ -8,6 +8,7 @@ email-validator==2.3.0
 httpx
 orjson==3.11.8
 python-multipart
+firebase-admin
 
 # --- LLM / RAG ---
 langchain==1.2.15
