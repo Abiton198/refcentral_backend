@@ -1,3 +1,15 @@
+"""
+Player Schemas
+
+Defines the data used to register and manage players.
+
+Important:
+- The player's permanent profile lives in the players collection.
+- Match-specific information will live under an appointment squad.
+- Identity documents are handled separately.
+"""
+
+from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -5,57 +17,86 @@ from pydantic import BaseModel, Field
 
 class PlayerCreate(BaseModel):
     """
-    Defines the information required to register a rugby player.
-
-    The frontend submits player details.
-    The backend supplies:
-    - player_id
-    - registered_by_uid
-    - timestamps
-    - status
+    Data required to register a new player.
     """
 
-    # Player's full legal name
-    full_name: str = Field(
+    first_name: str = Field(
         ...,
-        min_length=2,
-        max_length=150,
-    )
-
-    # Date of birth in YYYY-MM-DD format
-    date_of_birth: str = Field(
-        ...,
-        pattern=r"^\d{4}-\d{2}-\d{2}$",
-        description="Date of birth in YYYY-MM-DD format",
-    )
-
-    # Optional player registration or membership number
-    registration_number: Optional[str] = Field(
-        default=None,
+        min_length=1,
         max_length=100,
     )
 
-    # Rugby playing position
-    playing_position: Optional[str] = Field(
-        default=None,
-        max_length=80,
+    middle_name: Optional[str] = Field(
+        default="",
+        max_length=100,
     )
 
-    # Jersey number, if assigned
+    last_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+    )
+
+    date_of_birth: date
+
+    gender: Optional[str] = Field(
+        default=None,
+        max_length=30,
+    )
+
+    position: Optional[str] = Field(
+        default=None,
+        max_length=50,
+    )
+
     jersey_number: Optional[int] = Field(
         default=None,
         ge=1,
         le=99,
     )
 
-    # Emergency contact person's name
-    emergency_contact_name: Optional[str] = Field(
+
+class PlayerUpdate(BaseModel):
+    """
+    Fields that can be changed after registration.
+    """
+
+    first_name: Optional[str] = Field(
         default=None,
-        max_length=150,
+        min_length=1,
+        max_length=100,
     )
 
-    # Emergency contact telephone number
-    emergency_contact_phone: Optional[str] = Field(
+    middle_name: Optional[str] = Field(
+        default=None,
+        max_length=100,
+    )
+
+    last_name: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+    )
+
+    date_of_birth: Optional[date] = None
+
+    gender: Optional[str] = Field(
+        default=None,
+        max_length=30,
+    )
+
+    position: Optional[str] = Field(
+        default=None,
+        max_length=50,
+    )
+
+    jersey_number: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=99,
+    )
+
+    status: Optional[str] = Field(
         default=None,
         max_length=30,
     )
@@ -63,68 +104,28 @@ class PlayerCreate(BaseModel):
 
 class PlayerResponse(BaseModel):
     """
-    Defines the information returned for a registered player.
+    Player information returned by the API.
+
+    Identity-document information is intentionally excluded.
     """
 
     player_id: str
-    club_id: str
-    full_name: str
-    date_of_birth: str
-    registration_number: Optional[str] = None
-    playing_position: Optional[str] = None
+    team_id: str
+
+    first_name: str
+    middle_name: Optional[str] = None
+    last_name: str
+
+    date_of_birth: date
+
+    gender: Optional[str] = None
+    position: Optional[str] = None
     jersey_number: Optional[int] = None
-    emergency_contact_name: Optional[str] = None
-    emergency_contact_phone: Optional[str] = None
-    registered_by_uid: str
+
+    photo_url: Optional[str] = None
+
     status: str
+    registration_status: str
 
-class PlayerUpdate(BaseModel):
-    """
-    Defines the fields that can be changed after registration.
-
-    All fields are optional so the frontend can update only
-    the information that has changed.
-    """
-
-    # Updated player name
-    full_name: Optional[str] = Field(
-        default=None,
-        min_length=2,
-        max_length=150,
-    )
-
-    # Updated date of birth
-    date_of_birth: Optional[str] = Field(
-        default=None,
-        pattern=r"^\d{4}-\d{2}-\d{2}$",
-    )
-
-    # Updated registration number
-    registration_number: Optional[str] = Field(
-        default=None,
-        max_length=100,
-    )
-
-    # Updated playing position
-    playing_position: Optional[str] = Field(
-        default=None,
-        max_length=80,
-    )
-
-    # Updated jersey number
-    jersey_number: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=99,
-    )
-
-    # Updated emergency contact details
-    emergency_contact_name: Optional[str] = Field(
-        default=None,
-        max_length=150,
-    )
-
-    emergency_contact_phone: Optional[str] = Field(
-        default=None,
-        max_length=30,
-    )
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None

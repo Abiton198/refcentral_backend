@@ -1,6 +1,29 @@
-from datetime import datetime, timezone
+"""
+Player Registration Routes
 
-from fastapi import APIRouter, Depends, HTTPException, status
+Team administrators use these endpoints to manage players
+belonging to their own team.
+
+Security model:
+
+Authenticated Firebase user
+        ↓
+Active team membership
+        ↓
+team_admin
+        ↓
+Can manage players for that team only
+"""
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+)
 
 from app.schemas.player_schema import (
     PlayerCreate,
@@ -9,577 +32,289 @@ from app.schemas.player_schema import (
 )
 
 from app.services.firestore_service import get_firestore_client
+
+from app.services.team_access_service import (
+    require_team_manager,
+    require_team_staff,
+)
+
 from app.utils.auth import get_current_user
 
 
-# All player endpoints will use this router
 router = APIRouter(
-    prefix="/api/clubs/{club_id}/players",
+    prefix="/api/teams",
     tags=["Players"],
 )
 
 
-# Roles permitted to register and manage players
-PLAYER_MANAGEMENT_ROLES = {
-    "owner",
-    "admin",
-}
-
-
-def get_authenticated_uid(current_user: dict) -> str:
+def get_db():
     """
-    Extract the authenticated user's UID from Firebase.
-
-    This prevents the frontend from choosing another user's UID.
+    Return Firestore client.
     """
-
-    user_uid = current_user.get("uid")
-
-    if not user_uid:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authenticated user UID was not found",
-        )
-
-    return user_uid
+    return get_firestore_client()
 
 
-def get_club_member(db, club_id: str, user_uid: str):
-    """
-    Retrieve the user's membership record for a club.
-
-    Firestore path:
-        clubs/{club_id}/members/{user_uid}
-
-    Returns None when the membership does not exist.
-    """
-
-    membership_reference = (
-        db.collection("clubs")
-        .document(club_id)
-        .collection("members")
-        .document(user_uid)
-    )
-
-    membership_snapshot = membership_reference.get()
-
-    if not membership_snapshot.exists:
-        return None
-
-    return membership_snapshot.to_dict()
-
-
-def require_player_management_access(
-    db,
-    club_id: str,
-    user_uid: str,
-):
-    """
-    Check whether the user can manage players.
-
-    Only active owners and administrators are permitted.
-    """
-
-    # Confirm that the user belongs to the club
-    membership = get_club_member(
-        db=db,
-        club_id=club_id,
-        user_uid=user_uid,
-    )
-
-    if not membership:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not a member of this club",
-        )
-
-    # Check that the membership is active
-    if membership.get("status") != "active":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your club membership is not active",
-        )
-
-    # Check the user's club role
-    role = membership.get("role")
-
-    if role not in PLAYER_MANAGEMENT_ROLES:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have permission to manage players",
-        )
-
-    return membership
-
-
-def get_player_response(
+def build_player_response(
     player_id: str,
-    club_id: str,
-    player_data: dict,
+    data: dict,
 ) -> PlayerResponse:
     """
-    Convert Firestore player data into a validated API response.
-
-    This keeps the response format consistent across endpoints.
+    Convert Firestore player data into the public API model.
     """
 
     return PlayerResponse(
         player_id=player_id,
-        club_id=club_id,
-        full_name=player_data.get("full_name", ""),
-        date_of_birth=player_data.get("date_of_birth", ""),
-        registration_number=player_data.get(
-            "registration_number"
+        team_id=data["teamId"],
+        first_name=data["firstName"],
+        middle_name=data.get("middleName", ""),
+        last_name=data["lastName"],
+        date_of_birth=data["dateOfBirth"],
+        gender=data.get("gender"),
+        position=data.get("position"),
+        jersey_number=data.get("jerseyNumber"),
+        photo_url=data.get("photoUrl"),
+        status=data.get("status", "active"),
+        registration_status=data.get(
+            "registrationStatus",
+            "registered",
         ),
-        playing_position=player_data.get(
-            "playing_position"
-        ),
-        jersey_number=player_data.get("jersey_number"),
-        emergency_contact_name=player_data.get(
-            "emergency_contact_name"
-        ),
-        emergency_contact_phone=player_data.get(
-            "emergency_contact_phone"
-        ),
-        registered_by_uid=player_data.get(
-            "registered_by_uid",
-            "",
-        ),
-        status=player_data.get("status", "active"),
+        created_at=data.get("createdAt"),
+        updated_at=data.get("updatedAt"),
     )
 
 
 @router.post(
-    "",
+    "/{team_id}/players",
     response_model=PlayerResponse,
-    status_code=status.HTTP_201_CREATED,
 )
-def create_player(
-    club_id: str,
-    player_data: PlayerCreate,
+def register_player(
+    team_id: str,
+    payload: PlayerCreate,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Register a new player under a specific club.
+    Register a new player for a team.
 
-    Process:
-    1. Authenticate the user through Firebase.
-    2. Verify the user's club membership and role.
-    3. Create a player document.
-    4. Save the player in the club's players subcollection.
+    Only an active team administrator can perform this action.
     """
 
-    user_uid = get_authenticated_uid(current_user)
+    uid = current_user.get("uid")
 
-    try:
-        # Connect to Firestore
-        db = get_firestore_client()
-
-        # Only club owners and administrators can register players
-        require_player_management_access(
-            db=db,
-            club_id=club_id,
-            user_uid=user_uid,
-        )
-
-        # Confirm that the parent club exists
-        club_reference = db.collection("clubs").document(club_id)
-        club_snapshot = club_reference.get()
-
-        if not club_snapshot.exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Club not found",
-            )
-
-        # Create a new player document with an automatic ID
-        player_reference = club_reference.collection(
-            "players"
-        ).document()
-
-        player_id = player_reference.id
-        current_time = datetime.now(timezone.utc)
-
-        # Prepare the player information
-        player_record = {
-            "player_id": player_id,
-            "club_id": club_id,
-            "full_name": player_data.full_name.strip(),
-            "date_of_birth": player_data.date_of_birth,
-            "registration_number": (
-                player_data.registration_number
-            ),
-            "playing_position": (
-                player_data.playing_position
-            ),
-            "jersey_number": player_data.jersey_number,
-            "emergency_contact_name": (
-                player_data.emergency_contact_name
-            ),
-            "emergency_contact_phone": (
-                player_data.emergency_contact_phone
-            ),
-            "registered_by_uid": user_uid,
-            "status": "active",
-            "created_at": current_time,
-            "updated_at": current_time,
-        }
-
-        # Save the player record to Firestore
-        player_reference.set(player_record)
-
-        # Return the newly created player
-        return get_player_response(
-            player_id=player_id,
-            club_id=club_id,
-            player_data=player_record,
-        )
-
-    except HTTPException:
-        # Preserve intentional HTTP errors
-        raise
-
-    except Exception as error:
-        # Print technical details during local development
-        print(f"Error creating player: {error}")
-
+    if not uid:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to register player",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user ID is missing",
         )
 
+    # Verify that the authenticated user administers
+    # this specific team.
+    require_team_manager(uid, team_id)
 
-@router.get(
-    "",
-    response_model=list[PlayerResponse],
-)
-def list_players(
-    club_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    List all active players belonging to a club.
+    db = get_db()
 
-    Any active club member can view the player list.
-    """
+    # Prevent duplicate jersey numbers within the team.
+    if payload.jersey_number is not None:
 
-    user_uid = get_authenticated_uid(current_user)
-
-    try:
-        # Connect to Firestore
-        db = get_firestore_client()
-
-        # Verify that the user belongs to this club
-        membership = get_club_member(
-            db=db,
-            club_id=club_id,
-            user_uid=user_uid,
-        )
-
-        if not membership or membership.get("status") != "active":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have access to this club",
+        existing = (
+            db.collection("players")
+            .where("teamId", "==", team_id)
+            .where(
+                "jerseyNumber",
+                "==",
+                payload.jersey_number,
             )
-
-        # Confirm that the club exists
-        club_reference = db.collection("clubs").document(club_id)
-
-        if not club_reference.get().exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Club not found",
+            .where(
+                "status",
+                "==",
+                "active",
             )
-
-        # Retrieve the players subcollection
-        players_query = (
-            club_reference
-            .collection("players")
-            .where("status", "==", "active")
+            .limit(1)
             .stream()
         )
 
-        players = []
-
-        for player_snapshot in players_query:
-            player_data = player_snapshot.to_dict()
-
-            players.append(
-                get_player_response(
-                    player_id=player_snapshot.id,
-                    club_id=club_id,
-                    player_data=player_data,
-                )
+        for player in existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This jersey number is already "
+                    "assigned to an active player"
+                ),
             )
 
-        return players
+    player_id = uuid4().hex
 
-    except HTTPException:
-        raise
+    now = datetime.now(timezone.utc)
 
-    except Exception as error:
-        print(f"Error listing players: {error}")
+    player_data = {
+        "teamId": team_id,
 
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to retrieve players",
-        )
+        "firstName": payload.first_name,
+        "middleName": payload.middle_name or "",
+        "lastName": payload.last_name,
+
+        "dateOfBirth": payload.date_of_birth,
+
+        "gender": payload.gender,
+        "position": payload.position,
+        "jerseyNumber": payload.jersey_number,
+
+        # Photo will be added through the upload endpoint.
+        "photoUrl": None,
+
+        "status": "active",
+        "registrationStatus": "registered",
+
+        "createdAt": now,
+        "updatedAt": now,
+
+        "createdBy": uid,
+        "updatedBy": uid,
+    }
+
+    (
+        db.collection("players")
+        .document(player_id)
+        .set(player_data)
+    )
+
+    return build_player_response(
+        player_id,
+        player_data,
+    )
 
 
 @router.get(
-    "/{player_id}",
-    response_model=PlayerResponse,
+    "/{team_id}/players",
+    response_model=list[PlayerResponse],
 )
-def get_player(
-    club_id: str,
-    player_id: str,
+def list_team_players(
+    team_id: str,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Retrieve one player from a club.
+    Return players registered to a team.
 
-    The authenticated user must be an active member of the club.
+    Currently only team administrators can access the
+    team's complete player register.
     """
 
-    user_uid = get_authenticated_uid(current_user)
+    uid = current_user.get("uid")
 
-    try:
-        # Connect to Firestore
-        db = get_firestore_client()
-
-        # Verify club membership
-        membership = get_club_member(
-            db=db,
-            club_id=club_id,
-            user_uid=user_uid,
-        )
-
-        if not membership or membership.get("status") != "active":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have access to this club",
-            )
-
-        # Build the player document reference
-        player_reference = (
-            db.collection("clubs")
-            .document(club_id)
-            .collection("players")
-            .document(player_id)
-        )
-
-        # Retrieve the player document
-        player_snapshot = player_reference.get()
-
-        if not player_snapshot.exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Player not found",
-            )
-
-        player_data = player_snapshot.to_dict()
-
-        # Return the player information
-        return get_player_response(
-            player_id=player_snapshot.id,
-            club_id=club_id,
-            player_data=player_data,
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as error:
-        print(f"Error retrieving player: {error}")
-
+    if not uid:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to retrieve player",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user ID is missing",
         )
+
+    require_team_manager(uid, team_id)
+
+    db = get_db()
+
+    documents = (
+        db.collection("players")
+        .where("teamId", "==", team_id)
+        .stream()
+    )
+
+    players = []
+
+    for document in documents:
+        players.append(
+            build_player_response(
+                document.id,
+                document.to_dict(),
+            )
+        )
+
+    return players
+
 
 @router.patch(
-    "/{player_id}",
+    "/{team_id}/players/{player_id}",
     response_model=PlayerResponse,
 )
 def update_player(
-    club_id: str,
+    team_id: str,
     player_id: str,
-    player_data: PlayerUpdate,
+    payload: PlayerUpdate,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Update an existing player's information.
-
-    Only active club owners and administrators can perform updates.
+    Update a player belonging to the specified team.
     """
 
-    user_uid = get_authenticated_uid(current_user)
+    uid = current_user.get("uid")
 
-    try:
-        # Connect to Firestore
-        db = get_firestore_client()
-
-        # Confirm that the user has player-management permissions
-        require_player_management_access(
-            db=db,
-            club_id=club_id,
-            user_uid=user_uid,
-        )
-
-        # Reference the requested player document
-        player_reference = (
-            db.collection("clubs")
-            .document(club_id)
-            .collection("players")
-            .document(player_id)
-        )
-
-        player_snapshot = player_reference.get()
-
-        if not player_snapshot.exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Player not found",
-            )
-
-        # Get only fields actually provided in the request
-        update_data = player_data.model_dump(
-            exclude_unset=True
-        )
-
-        # Remove whitespace from the player's name
-        if "full_name" in update_data:
-            update_data["full_name"] = (
-                update_data["full_name"].strip()
-            )
-
-        # Prevent duplicate registration numbers
-        if (
-            "registration_number" in update_data
-            and update_data["registration_number"]
-        ):
-            duplicate_query = (
-                db.collection("clubs")
-                .document(club_id)
-                .collection("players")
-                .where(
-                    "registration_number",
-                    "==",
-                    update_data["registration_number"],
-                )
-                .stream()
-            )
-
-            for duplicate in duplicate_query:
-                # Exclude the player currently being updated
-                if duplicate.id != player_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            "This registration number is already "
-                            "used by another player"
-                        ),
-                    )
-
-        # Add the time of the update
-        update_data["updated_at"] = datetime.now(timezone.utc)
-
-        # Apply the changes to Firestore
-        player_reference.update(update_data)
-
-        # Read the updated document
-        updated_snapshot = player_reference.get()
-        updated_data = updated_snapshot.to_dict()
-
-        # Return the updated player
-        return get_player_response(
-            player_id=player_id,
-            club_id=club_id,
-            player_data=updated_data,
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as error:
-        print(f"Error updating player: {error}")
-
+    if not uid:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to update player",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user ID is missing",
         )
 
+    require_team_manager(uid, team_id)
 
-@router.patch(
-    "/{player_id}/deactivate",
-    response_model=PlayerResponse,
-)
-def deactivate_player(
-    club_id: str,
-    player_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Deactivate a player without deleting their record.
+    db = get_db()
 
-    This preserves historical registration and match-related data
-    for future reporting.
-    """
+    player_ref = (
+        db.collection("players")
+        .document(player_id)
+    )
 
-    user_uid = get_authenticated_uid(current_user)
+    snapshot = player_ref.get()
 
-    try:
-        # Connect to Firestore
-        db = get_firestore_client()
-
-        # Only authorized club administrators can deactivate players
-        require_player_management_access(
-            db=db,
-            club_id=club_id,
-            user_uid=user_uid,
-        )
-
-        # Reference the player document
-        player_reference = (
-            db.collection("clubs")
-            .document(club_id)
-            .collection("players")
-            .document(player_id)
-        )
-
-        player_snapshot = player_reference.get()
-
-        if not player_snapshot.exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Player not found",
-            )
-
-        # Update status instead of permanently deleting the record
-        player_reference.update(
-            {
-                "status": "inactive",
-                "updated_at": datetime.now(timezone.utc),
-            }
-        )
-
-        # Read the updated player document
-        updated_snapshot = player_reference.get()
-        updated_data = updated_snapshot.to_dict()
-
-        return get_player_response(
-            player_id=player_id,
-            club_id=club_id,
-            player_data=updated_data,
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as error:
-        print(f"Error deactivating player: {error}")
-
+    if not snapshot.exists:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to deactivate player",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player not found",
         )
+
+    player = snapshot.to_dict()
+
+    # Prevent a team administrator from modifying
+    # another team's player.
+    if player.get("teamId") != team_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This player does not belong to your team",
+        )
+
+    updates = {}
+
+    if payload.first_name is not None:
+        updates["firstName"] = payload.first_name
+
+    if payload.middle_name is not None:
+        updates["middleName"] = payload.middle_name
+
+    if payload.last_name is not None:
+        updates["lastName"] = payload.last_name
+
+    if payload.date_of_birth is not None:
+        updates["dateOfBirth"] = payload.date_of_birth
+
+    if payload.gender is not None:
+        updates["gender"] = payload.gender
+
+    if payload.position is not None:
+        updates["position"] = payload.position
+
+    if payload.jersey_number is not None:
+        updates["jerseyNumber"] = payload.jersey_number
+
+    if payload.status is not None:
+        updates["status"] = payload.status
+
+    updates["updatedAt"] = datetime.now(timezone.utc)
+    updates["updatedBy"] = uid
+
+    player_ref.update(updates)
+
+    updated_player = {
+        **player,
+        **updates,
+    }
+
+    return build_player_response(
+        player_id,
+        updated_player,
+    )
