@@ -115,4 +115,6 @@ def root():
         "success": True,
         "message": "Welcome to RefCentral API",
         "version": "1.0.0",
+        "status": "ok"
     }
+
