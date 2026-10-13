@@ -152,7 +152,7 @@ def register_player(
         "middleName": payload.middle_name or "",
         "lastName": payload.last_name,
 
-        "dateOfBirth": payload.date_of_birth,
+        "dateOfBirth": payload.date_of_birth.isoformat(),
 
         "gender": payload.gender,
         "position": payload.position,
@@ -290,7 +290,7 @@ def update_player(
         updates["lastName"] = payload.last_name
 
     if payload.date_of_birth is not None:
-        updates["dateOfBirth"] = payload.date_of_birth
+        updates["dateOfBirth"] = payload.date_of_birth.isoformat()
 
     if payload.gender is not None:
         updates["gender"] = payload.gender
